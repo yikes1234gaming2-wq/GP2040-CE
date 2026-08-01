@@ -70,3 +70,5 @@ public:
 
     virtual std::string name() override { return "MPR121 Touch Sensor"; }
 };
+
+GPADDON_REGISTER(MPR121Addon)
