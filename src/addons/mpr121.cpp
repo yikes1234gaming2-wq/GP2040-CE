@@ -46,7 +46,7 @@ void MPR121Input::process() {
     i2c_read_blocking(i2c0, MPR121_I2C_ADDR, buf, 2, false);
     uint16_t touched = ((uint16_t)buf[1] << 8) | buf[0];
 
-    Gamepad *gamepad = Storage::getInstance().getGamepad();
+    Gamepad *gamepad = Storage::getInstance().GetGamepad();
 
     // Directional mapping (ELE0 - ELE3)
     if (touched & (1 << 1))  gamepad->state.dpad |= GAMEPAD_MASK_UP;
