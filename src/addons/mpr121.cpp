@@ -20,12 +20,12 @@ bool MPR121Input::available() {
 }
 
 void MPR121Input::setup() {
-    // 1. Enable Onboard LED as an I2C handshake indicator
+    // 1. Enable Onboard LED as a diagnostic indicator
     gpio_init(PICO_DEFAULT_LED_PIN);
     gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
     gpio_put(PICO_DEFAULT_LED_PIN, 0); // Off by default
 
-    // 2. Force-claim GP0 (SDA) and GP1 (SCL) to prevent button-mapping overrides
+    // 2. Force-claim GP0 (SDA) and GP1 (SCL)
     gpio_init(0);
     gpio_init(1);
     gpio_set_function(0, GPIO_FUNC_I2C);
@@ -33,39 +33,42 @@ void MPR121Input::setup() {
     gpio_pull_up(0);
     gpio_pull_up(1);
 
-    // 3. Re-initialize i2c0 at 100kHz standard mode for maximum bus reliability
+    // 3. Re-initialize i2c0 at 100kHz standard mode
     i2c_deinit(i2c0);
     i2c_init(i2c0, 100 * 1000);
 
-    // Give hardware and Adafruit regulator 50ms to fully stabilize
-    sleep_ms(50);
+    sleep_ms(100); // Allow lines and regulator to settle
 
-    // 4. Hardware Ping Test: Check if MPR121 responds at address 0x5A
-    uint8_t test_reg = MPR121_ECR;
-    uint8_t test_val = 0;
-    int ack = i2c_write_blocking(i2c0, MPR121_I2C_ADDR, &test_reg, 1, true);
-    if (ack >= 0) {
-        ack = i2c_read_blocking(i2c0, MPR121_I2C_ADDR, &test_val, 1, false);
+    // 4. I2C BUS SCANNER: Probe every possible address (0x08 to 0x77)
+    bool device_found = false;
+    for (uint8_t addr = 0x08; addr < 0x78; addr++) {
+        uint8_t rxdata;
+        // Probe address with a dummy read
+        int ret = i2c_read_blocking(i2c0, addr, &rxdata, 1, false);
+        if (ret >= 0) {
+            device_found = true;
+            break; // Acknowledge received!
+        }
     }
 
-    // IF ACK IS RECEIVED: Light up the onboard LED!
-    if (ack >= 0) {
+    // IF ANY DEVICE RESPONDS ON THE BUS: Turn ON onboard LED!
+    if (device_found) {
         gpio_put(PICO_DEFAULT_LED_PIN, 1);
     } else {
-        // Stop setup if communication failed
+        // No device acknowledged on GP0/GP1
         return;
     }
 
     // 5. Soft Reset MPR121
     uint8_t reset_buf[2] = { MPR121_SOFT_RESET, 0x63 };
     i2c_write_blocking(i2c0, MPR121_I2C_ADDR, reset_buf, 2, false);
-    sleep_ms(20); // Delay for reset completion
+    sleep_ms(20);
 
-    // 6. Enter Stop Mode to allow register updates
+    // 6. Enter Stop Mode for register setup
     uint8_t ecr_stop[2] = { MPR121_ECR, 0x00 };
     i2c_write_blocking(i2c0, MPR121_I2C_ADDR, ecr_stop, 2, false);
 
-    // 7. Configure Touch and Release thresholds for all 12 electrodes
+    // 7. Configure Touch/Release thresholds for all 12 channels
     for (int i = 0; i < 12; i++) {
         uint8_t tth[2] = { (uint8_t)(0x41 + (i * 2)), 12 };
         uint8_t rth[2] = { (uint8_t)(0x41 + (i * 2) + 1), 6 };
@@ -73,7 +76,7 @@ void MPR121Input::setup() {
         i2c_write_blocking(i2c0, MPR121_I2C_ADDR, rth, 2, false);
     }
 
-    // 8. Enable touch channels (ELE0 - ELE11) with baseline tracking
+    // 8. Run Mode (Enable ELE0 - ELE11)
     uint8_t ecr_run[2] = { MPR121_ECR, 0x8F };
     i2c_write_blocking(i2c0, MPR121_I2C_ADDR, ecr_run, 2, false);
 }
@@ -82,11 +85,9 @@ void MPR121Input::process() {
     uint8_t buf[2] = {0};
     uint8_t reg = MPR121_TOUCH_STATUS_LSB;
 
-    // Read 2 status bytes starting from register 0x00
     if (i2c_write_blocking(i2c0, MPR121_I2C_ADDR, &reg, 1, true) < 0) return;
     if (i2c_read_blocking(i2c0, MPR121_I2C_ADDR, buf, 2, false) < 0) return;
 
-    // Convert LSB/MSB to a 16-bit touched state
     uint16_t touched = ((uint16_t)buf[1] << 8) | buf[0];
 
     Gamepad *gamepad = Storage::getInstance().GetGamepad();
