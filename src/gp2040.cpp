@@ -65,6 +65,12 @@ void GP2040::setup() {
 	PeripheralManager::getInstance().initSPI();
 	PeripheralManager::getInstance().initI2C();
 
+	// Initialize custom MPR121 Touch Driver
+	mpr121Addon = new MPR121Input();
+	if (mpr121Addon != nullptr) {
+    mpr121Addon->setup();
+	}
+	
 	Gamepad * gamepad = new Gamepad();
 	Gamepad * processedGamepad = new Gamepad();
 	Storage::getInstance().SetGamepad(gamepad);
@@ -76,11 +82,7 @@ void GP2040::setup() {
 	GamepadOptions& gamepadOptions = Storage::getInstance().getGamepadOptions();
 	uint32_t prevProfile = gamepadOptions.profileNumber;
 	bool profileChanged = false;
-	// Initialize custom MPR121 Touch Driver
-	mpr121Addon = new MPR121Input();
-	if (mpr121Addon != nullptr) {
-    mpr121Addon->setup();
-	}
+	
 
 	if (bootModeOptions.enabled) {
 		bootAction = getGpioMappedBootAction();
@@ -164,6 +166,7 @@ void GP2040::setup() {
 	// register system event handlers
 	EventManager::getInstance().registerEventHandler(GP_EVENT_STORAGE_SAVE, GPEVENT_CALLBACK(this->handleStorageSave(event)));
 	EventManager::getInstance().registerEventHandler(GP_EVENT_RESTART, GPEVENT_CALLBACK(this->handleSystemReboot(event)));
+
 }
 
 /**
