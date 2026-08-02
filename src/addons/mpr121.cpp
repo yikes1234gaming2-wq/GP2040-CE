@@ -18,13 +18,12 @@
 #define I2C_TIMEOUT_US 1000 
 
 void MPR121Input::setup() {
-    // 1. Enable Onboard LED Heartbeat
+    // Enable Onboard LED Heartbeat
     gpio_init(PICO_DEFAULT_LED_PIN);
     gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
     gpio_put(PICO_DEFAULT_LED_PIN, 1); 
 
-    // 2. EXPLICITLY initialize i2c0 and pins GP0 (SDA) / GP1 (SCL)
-    // This prevents the RP2040 from hard-faulting on unclocked I2C hardware!
+    // Initialize i2c0 hardware and pins GP0 (SDA) / GP1 (SCL)
     gpio_set_function(0, GPIO_FUNC_I2C);
     gpio_set_function(1, GPIO_FUNC_I2C);
     gpio_pull_up(0);
@@ -32,18 +31,29 @@ void MPR121Input::setup() {
     
     i2c_init(i2c0, 100 * 1000); // 100kHz standard speed
 
-    sleep_ms(150); // Power stabilization delay
+    sleep_ms(100); // Power stabilization delay
 
-    // 3. Soft Reset MPR121
+    // PROBE: Check if MPR121 is actually alive at address 0x5A
+    uint8_t dummy = 0;
+    int probed = i2c_read_timeout_us(i2c0, MPR121_I2C_ADDR, &dummy, 1, false, 5000); // 5ms timeout
+
+    if (probed < 0) {
+        // MPR121 not responding! Turn LED OFF to indicate missing/faulty wiring,
+        // and RETURN IMMEDIATELY so main GP2040 loop doesn't freeze.
+        gpio_put(PICO_DEFAULT_LED_PIN, 0);
+        return; 
+    }
+
+    // Soft Reset MPR121
     uint8_t reset_buf[2] = { MPR121_SOFT_RESET, 0x63 };
     i2c_write_timeout_us(i2c0, MPR121_I2C_ADDR, reset_buf, 2, false, I2C_TIMEOUT_US);
     sleep_ms(20);
 
-    // 4. Enter Stop Mode
+    // Enter Stop Mode
     uint8_t ecr_stop[2] = { MPR121_ECR, 0x00 };
     i2c_write_timeout_us(i2c0, MPR121_I2C_ADDR, ecr_stop, 2, false, I2C_TIMEOUT_US);
 
-    // 5. Threshold Configuration
+    // Threshold Configuration
     for (int i = 0; i < 12; i++) {
         uint8_t tth[2] = { (uint8_t)(0x41 + (i * 2)), 12 };
         uint8_t rth[2] = { (uint8_t)(0x41 + (i * 2) + 1), 6 };
@@ -51,7 +61,7 @@ void MPR121Input::setup() {
         i2c_write_timeout_us(i2c0, MPR121_I2C_ADDR, rth, 2, false, I2C_TIMEOUT_US);
     }
 
-    // 6. Run Mode
+    // Run Mode
     uint8_t ecr_run[2] = { MPR121_ECR, 0x8F };
     i2c_write_timeout_us(i2c0, MPR121_I2C_ADDR, ecr_run, 2, false, I2C_TIMEOUT_US);
 }
