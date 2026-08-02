@@ -33,37 +33,37 @@ void MPR121Input::setup() {
 
     sleep_ms(100); // Power stabilization delay
 
-    // PROBE: Check if MPR121 is actually alive at address 0x5A
-    uint8_t dummy = 0;
-    int probed = i2c_read_timeout_us(i2c0, MPR121_I2C_ADDR, &dummy, 1, false, 5000); // 5ms timeout
+    // Helper lambda for safe writes
+    auto safe_write = [](uint8_t reg, uint8_t val) -> bool {
+        uint8_t buf[2] = { reg, val };
+        int res = i2c_write_timeout_us(i2c0, MPR121_I2C_ADDR, buf, 2, false, I2C_TIMEOUT_US);
+        return res == 2;
+    };
 
-    if (probed < 0) {
-        // MPR121 not responding! Turn LED OFF to indicate missing/faulty wiring,
-        // and RETURN IMMEDIATELY so main GP2040 loop doesn't freeze.
-        gpio_put(PICO_DEFAULT_LED_PIN, 0);
+    // PROBE: Check if MPR121 is responsive
+    uint8_t dummy = 0;
+    if (i2c_read_timeout_us(i2c0, MPR121_I2C_ADDR, &dummy, 1, false, 5000) < 0) {
+        gpio_put(PICO_DEFAULT_LED_PIN, 0); // LED off if uncommunicative
         return; 
     }
 
-    // Soft Reset MPR121
-    uint8_t reset_buf[2] = { MPR121_SOFT_RESET, 0x63 };
-    i2c_write_timeout_us(i2c0, MPR121_I2C_ADDR, reset_buf, 2, false, I2C_TIMEOUT_US);
-    sleep_ms(20);
-
-    // Enter Stop Mode
-    uint8_t ecr_stop[2] = { MPR121_ECR, 0x00 };
-    i2c_write_timeout_us(i2c0, MPR121_I2C_ADDR, ecr_stop, 2, false, I2C_TIMEOUT_US);
-
-    // Threshold Configuration
-    for (int i = 0; i < 12; i++) {
-        uint8_t tth[2] = { (uint8_t)(0x41 + (i * 2)), 12 };
-        uint8_t rth[2] = { (uint8_t)(0x41 + (i * 2) + 1), 6 };
-        i2c_write_timeout_us(i2c0, MPR121_I2C_ADDR, tth, 2, false, I2C_TIMEOUT_US);
-        i2c_write_timeout_us(i2c0, MPR121_I2C_ADDR, rth, 2, false, I2C_TIMEOUT_US);
+    // 1. Put MPR121 in Stop Mode before configuring
+    if (!safe_write(MPR121_ECR, 0x00)) {
+        gpio_put(PICO_DEFAULT_LED_PIN, 0);
+        return;
     }
 
-    // Run Mode
-    uint8_t ecr_run[2] = { MPR121_ECR, 0x8F };
-    i2c_write_timeout_us(i2c0, MPR121_I2C_ADDR, ecr_run, 2, false, I2C_TIMEOUT_US);
+    // 2. Set default baseline filtering and thresholds (Touch: 12, Release: 6)
+    for (int i = 0; i < 12; i++) {
+        safe_write((uint8_t)(0x41 + (i * 2)), 12);     // Touch threshold ELEi
+        safe_write((uint8_t)(0x41 + (i * 2) + 1), 6);  // Release threshold ELEi
+    }
+
+    // 3. Enter Run Mode (Enable all 12 electrodes, baseline tracking on)
+    if (!safe_write(MPR121_ECR, 0x8F)) {
+        gpio_put(PICO_DEFAULT_LED_PIN, 0);
+        return;
+    }
 }
 
 void MPR121Input::process() {
