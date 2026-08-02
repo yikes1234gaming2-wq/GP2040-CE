@@ -33,6 +33,7 @@
 #include "addons/gamepad_usb_host.h"
 #include "addons/he_trigger.h"
 #include "addons/tg16_input.h"
+#include "addons/mpr121.h"
 
 // Pico includes
 #include "pico/bootrom.h"
@@ -53,6 +54,7 @@ static const uint32_t REBOOT_HOTKEY_HOLD_TIME_MS = 4000;
 const static uint32_t rebootDelayMs = 500;
 static absolute_time_t rebootDelayTimeout = nil_time;
 
+static MPR121Input* mpr121Addon = nullptr;
 
 void GP2040::setup() {
 	Storage::getInstance().init();
@@ -74,6 +76,11 @@ void GP2040::setup() {
 	GamepadOptions& gamepadOptions = Storage::getInstance().getGamepadOptions();
 	uint32_t prevProfile = gamepadOptions.profileNumber;
 	bool profileChanged = false;
+	// Initialize custom MPR121 Touch Driver
+	mpr121Addon = new MPR121Input();
+	if (mpr121Addon != nullptr) {
+    mpr121Addon->setup();
+	}
 
 	if (bootModeOptions.enabled) {
 		bootAction = getGpioMappedBootAction();
@@ -273,6 +280,11 @@ void GP2040::run() {
 
 		// Pre-Process add-ons for MPGS
 		addons.PreprocessAddons();
+
+		// 🟢 RUN YOUR TOUCH DRIVER PROCESS HERE EVERY FRAME
+		if (mpr121Addon != nullptr) {
+			mpr121Addon->process();
+		}
 
 		gamepad->process(); // process through MPGS
 
