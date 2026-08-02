@@ -18,26 +18,32 @@
 #define I2C_TIMEOUT_US 1000 
 
 void MPR121Input::setup() {
-    // Enable Onboard LED Heartbeat
+    // 1. Enable Onboard LED Heartbeat
     gpio_init(PICO_DEFAULT_LED_PIN);
     gpio_set_dir(PICO_DEFAULT_LED_PIN, GPIO_OUT);
     gpio_put(PICO_DEFAULT_LED_PIN, 1); 
 
-    // DO NOT call gpio_init(0), gpio_init(1), i2c_deinit, or i2c_init here!
-    // PeripheralManager::getInstance().initI2C() in gp2040.cpp already prepared i2c0.
+    // 2. EXPLICITLY initialize i2c0 and pins GP0 (SDA) / GP1 (SCL)
+    // This prevents the RP2040 from hard-faulting on unclocked I2C hardware!
+    gpio_set_function(0, GPIO_FUNC_I2C);
+    gpio_set_function(1, GPIO_FUNC_I2C);
+    gpio_pull_up(0);
+    gpio_pull_up(1);
+    
+    i2c_init(i2c0, 100 * 1000); // 100kHz standard speed
 
     sleep_ms(150); // Power stabilization delay
 
-    // Soft Reset MPR121
+    // 3. Soft Reset MPR121
     uint8_t reset_buf[2] = { MPR121_SOFT_RESET, 0x63 };
     i2c_write_timeout_us(i2c0, MPR121_I2C_ADDR, reset_buf, 2, false, I2C_TIMEOUT_US);
     sleep_ms(20);
 
-    // Enter Stop Mode
+    // 4. Enter Stop Mode
     uint8_t ecr_stop[2] = { MPR121_ECR, 0x00 };
     i2c_write_timeout_us(i2c0, MPR121_I2C_ADDR, ecr_stop, 2, false, I2C_TIMEOUT_US);
 
-    // Threshold Configuration
+    // 5. Threshold Configuration
     for (int i = 0; i < 12; i++) {
         uint8_t tth[2] = { (uint8_t)(0x41 + (i * 2)), 12 };
         uint8_t rth[2] = { (uint8_t)(0x41 + (i * 2) + 1), 6 };
@@ -45,7 +51,7 @@ void MPR121Input::setup() {
         i2c_write_timeout_us(i2c0, MPR121_I2C_ADDR, rth, 2, false, I2C_TIMEOUT_US);
     }
 
-    // Run Mode
+    // 6. Run Mode
     uint8_t ecr_run[2] = { MPR121_ECR, 0x8F };
     i2c_write_timeout_us(i2c0, MPR121_I2C_ADDR, ecr_run, 2, false, I2C_TIMEOUT_US);
 }
