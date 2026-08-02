@@ -10,7 +10,7 @@
 
 class MPR121Input : public GPAddon {
 public:
-    virtual bool available() override { return true; }
+    virtual bool available() override;
     virtual void setup() override;
     virtual void process() override;
     virtual std::string name() override { return "MPR121"; }
