@@ -14,9 +14,9 @@
 #define PICO_DEFAULT_LED_PIN 25
 #endif
 
-bool MPR121Input::available() {
-    return true;
-}
+//bool MPR121Input::available() {
+//    return true;
+//}
 
 void MPR121Input::setup() {
     // 1. Enable Onboard LED & Turn ON immediately as a Heartbeat
