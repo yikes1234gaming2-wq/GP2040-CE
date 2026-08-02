@@ -54,8 +54,6 @@ static const uint32_t REBOOT_HOTKEY_HOLD_TIME_MS = 4000;
 const static uint32_t rebootDelayMs = 500;
 static absolute_time_t rebootDelayTimeout = nil_time;
 
-static MPR121Input* mpr121Addon = nullptr;
-
 void GP2040::setup() {
 	Storage::getInstance().init();
 
@@ -65,12 +63,6 @@ void GP2040::setup() {
 	PeripheralManager::getInstance().initSPI();
 	PeripheralManager::getInstance().initI2C();
 
-	// Initialize custom MPR121 Touch Driver
-	mpr121Addon = new MPR121Input();
-	if (mpr121Addon != nullptr) {
-    mpr121Addon->setup();
-	}
-	
 	Gamepad * gamepad = new Gamepad();
 	Gamepad * processedGamepad = new Gamepad();
 	Storage::getInstance().SetGamepad(gamepad);
@@ -82,7 +74,6 @@ void GP2040::setup() {
 	GamepadOptions& gamepadOptions = Storage::getInstance().getGamepadOptions();
 	uint32_t prevProfile = gamepadOptions.profileNumber;
 	bool profileChanged = false;
-	
 
 	if (bootModeOptions.enabled) {
 		bootAction = getGpioMappedBootAction();
@@ -103,7 +94,7 @@ void GP2040::setup() {
 
 	// now we can load the latest configured profile, which will map the
 	// new set of GPIOs to use...
-  this->initializeStandardGpio();
+	this->initializeStandardGpio();
 
 	// Initialize our ADC (various add-ons)
 	adc_init();
@@ -111,6 +102,7 @@ void GP2040::setup() {
 	// Setup Add-ons
 	addons.LoadUSBAddon(new KeyboardHostAddon());
 	addons.LoadUSBAddon(new GamepadUSBHostAddon());
+	addons.LoadAddon(new MPR121Input());
 	addons.LoadAddon(new AnalogInput());
 	addons.LoadAddon(new HETriggerAddon());
 	addons.LoadAddon(new BootselButtonAddon());
@@ -166,7 +158,6 @@ void GP2040::setup() {
 	// register system event handlers
 	EventManager::getInstance().registerEventHandler(GP_EVENT_STORAGE_SAVE, GPEVENT_CALLBACK(this->handleStorageSave(event)));
 	EventManager::getInstance().registerEventHandler(GP_EVENT_RESTART, GPEVENT_CALLBACK(this->handleSystemReboot(event)));
-
 }
 
 /**
@@ -284,11 +275,6 @@ void GP2040::run() {
 		// Pre-Process add-ons for MPGS
 		addons.PreprocessAddons();
 
-		// 🟢 RUN YOUR TOUCH DRIVER PROCESS HERE EVERY FRAME
-		if (mpr121Addon != nullptr) {
-			mpr121Addon->process();
-		}
-
 		gamepad->process(); // process through MPGS
 
 		// (Post) Process for add-ons
@@ -396,7 +382,7 @@ GP2040::BootAction GP2040::getButtonMappedBootAction() {
 	bool modeSwitchLocked = forcedSetupOptions.mode == FORCED_SETUP_MODE_LOCK_MODE_SWITCH ||
 													forcedSetupOptions.mode == FORCED_SETUP_MODE_LOCK_BOTH;
 
-	bool webConfigLocked  = forcedSetupOptions.mode == FORCED_SETUP_MODE_LOCK_WEB_CONFIG ||
+	bool webConfigLocked = forcedSetupOptions.mode == FORCED_SETUP_MODE_LOCK_WEB_CONFIG ||
 													forcedSetupOptions.mode == FORCED_SETUP_MODE_LOCK_BOTH;
 
 	if (gamepad->pressedS1() && gamepad->pressedS2() && gamepad->pressedUp()) {
@@ -404,7 +390,7 @@ GP2040::BootAction GP2040::getButtonMappedBootAction() {
 		return bootAction;
 	}
 	if (!webConfigLocked && gamepad->pressedS2()) {
-		bootAction.inputMode =  InputMode::INPUT_MODE_CONFIG;
+		bootAction.inputMode = InputMode::INPUT_MODE_CONFIG;
 		return bootAction;
 	}
 	// input mask, action
@@ -446,12 +432,15 @@ GP2040::BootAction GP2040::getGpioMappedBootAction() {
 
 	switch (System::takeBootMode()) {
 		case System::BootMode::GAMEPAD:
+			deinitializeStandardGpio();
 			return action;
 		case System::BootMode::WEBCONFIG:
 			action.inputMode = InputMode::INPUT_MODE_CONFIG;
+			deinitializeStandardGpio();
 			return action;
 		case System::BootMode::USB:
 			action.type = BootActionType::ENTER_USB_MODE;
+			deinitializeStandardGpio();
 			return action;
 		default:
 			break;
@@ -460,11 +449,13 @@ GP2040::BootAction GP2040::getGpioMappedBootAction() {
 
 	if (gpio == bootModeOptions.usbModePinMask) {
 		action.type = BootActionType::ENTER_USB_MODE;
+		deinitializeStandardGpio();
 		return action;
 	}
 
 	if (gpio == bootModeOptions.webConfigPinMask) {
 		action.inputMode = InputMode::INPUT_MODE_CONFIG;
+		deinitializeStandardGpio();
 		return action;
 	}
 
@@ -485,8 +476,6 @@ GP2040::BootAction GP2040::getGpioMappedBootAction() {
 	return action;
 }
 
-
-
 GP2040::RebootHotkeys::RebootHotkeys() :
 	active(false),
 	noButtonsPressedTimeout(nil_time),
@@ -496,9 +485,6 @@ GP2040::RebootHotkeys::RebootHotkeys() :
 }
 
 void GP2040::RebootHotkeys::process(Gamepad* gamepad, bool configMode) {
-	// We only allow the hotkey to trigger after we observed no buttons pressed for a certain period of time.
-	// We do this to avoid detecting buttons that are held during the boot process. In particular we want to avoid
-	// oscillating between webconfig and default mode when the user keeps holding the hotkey buttons.
 	if (!active) {
 		if (gamepad->state.buttons == 0) {
 			if (is_nil_time(noButtonsPressedTimeout)) {
@@ -519,7 +505,6 @@ void GP2040::RebootHotkeys::process(Gamepad* gamepad, bool configMode) {
 
 			if (time_reached(rebootHotkeysHoldTimeout)) {
 				if (gamepad->state.buttons == webConfigHotkeyMask) {
-					// If we are in webconfig mode we go to gamepad mode and vice versa
 					System::reboot(configMode ? System::BootMode::GAMEPAD : System::BootMode::WEBCONFIG);
 				} else if (gamepad->state.buttons == bootselHotkeyMask) {
 					System::reboot(System::BootMode::USB);
@@ -532,54 +517,54 @@ void GP2040::RebootHotkeys::process(Gamepad* gamepad, bool configMode) {
 }
 
 void GP2040::checkRawState(const GamepadState& prevState, const GamepadState& currState) {
-    // buttons pressed
-    if (
-        ((currState.aux & ~prevState.aux) != 0) ||
-        ((currState.dpad & ~prevState.dpad) != 0) ||
-        ((currState.buttons & ~prevState.buttons) != 0)
-    ) {
-        EventManager::getInstance().triggerEvent(new GPButtonDownEvent((currState.dpad & ~prevState.dpad), (currState.buttons & ~prevState.buttons), (currState.aux & ~prevState.aux)));
-    }
+	// buttons pressed
+	if (
+		((currState.aux & ~prevState.aux) != 0) ||
+		((currState.dpad & ~prevState.dpad) != 0) ||
+		((currState.buttons & ~prevState.buttons) != 0)
+	) {
+		EventManager::getInstance().triggerEvent(new GPButtonDownEvent((currState.dpad & ~prevState.dpad), (currState.buttons & ~prevState.buttons), (currState.aux & ~prevState.aux)));
+	}
 
-    // buttons released
-    if (
-        ((prevState.aux & ~currState.aux) != 0) ||
-        ((prevState.dpad & ~currState.dpad) != 0) ||
-        ((prevState.buttons & ~currState.buttons) != 0)
-    ) {
-        EventManager::getInstance().triggerEvent(new GPButtonUpEvent((prevState.dpad & ~currState.dpad), (prevState.buttons & ~currState.buttons), (prevState.aux & ~currState.aux)));
-    }
+	// buttons released
+	if (
+		((prevState.aux & ~currState.aux) != 0) ||
+		((prevState.dpad & ~currState.dpad) != 0) ||
+		((prevState.buttons & ~currState.buttons) != 0)
+	) {
+		EventManager::getInstance().triggerEvent(new GPButtonUpEvent((prevState.dpad & ~currState.dpad), (prevState.buttons & ~currState.buttons), (prevState.aux & ~currState.aux)));
+	}
 }
 
 void GP2040::checkProcessedState(const GamepadState& prevState, const GamepadState& currState) {
-    // buttons pressed
-    if (
-        ((currState.aux & ~prevState.aux) != 0) ||
-        ((currState.dpad & ~prevState.dpad) != 0) ||
-        ((currState.buttons & ~prevState.buttons) != 0)
-    ) {
-        EventManager::getInstance().triggerEvent(new GPButtonProcessedDownEvent((currState.dpad & ~prevState.dpad), (currState.buttons & ~prevState.buttons), (currState.aux & ~prevState.aux)));
-    }
+	// buttons pressed
+	if (
+		((currState.aux & ~prevState.aux) != 0) ||
+		((currState.dpad & ~prevState.dpad) != 0) ||
+		((currState.buttons & ~prevState.buttons) != 0)
+	) {
+		EventManager::getInstance().triggerEvent(new GPButtonProcessedDownEvent((currState.dpad & ~prevState.dpad), (currState.buttons & ~prevState.buttons), (currState.aux & ~prevState.aux)));
+	}
 
-    // buttons released
-    if (
-        ((prevState.aux & ~currState.aux) != 0) ||
-        ((prevState.dpad & ~currState.dpad) != 0) ||
-        ((prevState.buttons & ~currState.buttons) != 0)
-    ) {
-        EventManager::getInstance().triggerEvent(new GPButtonProcessedUpEvent((prevState.dpad & ~currState.dpad), (prevState.buttons & ~currState.buttons), (prevState.aux & ~currState.aux)));
-    }
+	// buttons released
+	if (
+		((prevState.aux & ~currState.aux) != 0) ||
+		((prevState.dpad & ~currState.dpad) != 0) ||
+		((prevState.buttons & ~currState.buttons) != 0)
+	) {
+		EventManager::getInstance().triggerEvent(new GPButtonProcessedUpEvent((prevState.dpad & ~currState.dpad), (prevState.buttons & ~currState.buttons), (prevState.aux & ~currState.aux)));
+	}
 
-    if (
-        (currState.lx != prevState.lx) ||
-        (currState.ly != prevState.ly) ||
-        (currState.rx != prevState.rx) ||
-        (currState.ry != prevState.ry) ||
-        (currState.lt != prevState.lt) ||
-        (currState.rt != prevState.rt)
-    ) {
-        EventManager::getInstance().triggerEvent(new GPAnalogProcessedMoveEvent(currState.lx, currState.ly, currState.rx, currState.ry, currState.lt, currState.rt));
-    }
+	if (
+		(currState.lx != prevState.lx) ||
+		(currState.ly != prevState.ly) ||
+		(currState.rx != prevState.rx) ||
+		(currState.ry != prevState.ry) ||
+		(currState.lt != prevState.lt) ||
+		(currState.rt != prevState.rt)
+	) {
+		EventManager::getInstance().triggerEvent(new GPAnalogProcessedMoveEvent(currState.lx, currState.ly, currState.rx, currState.ry, currState.lt, currState.rt));
+	}
 }
 
 void GP2040::checkSaveRebootState() {
