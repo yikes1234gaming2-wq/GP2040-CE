@@ -14,9 +14,8 @@
 #define PICO_DEFAULT_LED_PIN 25
 #endif
 
-//bool MPR121Input::available() {
-//    return true;
-//}
+// Timeout for non-blocking I2C operations (1000 microseconds = 1ms)
+#define I2C_TIMEOUT_US 1000 
 
 void MPR121Input::setup() {
     // 1. Enable Onboard LED & Turn ON immediately as a Heartbeat
@@ -36,16 +35,16 @@ void MPR121Input::setup() {
     i2c_deinit(i2c0);
     i2c_init(i2c0, 100 * 1000);
 
-    sleep_ms(150); // Generous power stabilization delay
+    sleep_ms(150); // Power stabilization delay
 
-    // 4. Robust Write-Probe I2C Bus Scanner (0x08 to 0x77)
+    // 4. Robust Write-Probe I2C Bus Scanner with Timeout (0x08 to 0x77)
     bool device_found = false;
     uint8_t found_addr = 0;
 
     for (uint8_t addr = 0x08; addr < 0x78; addr++) {
         uint8_t dummy = 0;
-        // Probe using a 0-byte write (standard I2C ping)
-        int ret = i2c_write_blocking(i2c0, addr, &dummy, 0, false);
+        // Probe using a 0-byte write with timeout
+        int ret = i2c_write_timeout_us(i2c0, addr, &dummy, 0, false, I2C_TIMEOUT_US);
         if (ret >= 0) {
             device_found = true;
             found_addr = addr;
@@ -62,42 +61,49 @@ void MPR121Input::setup() {
             sleep_ms(100);
         }
         gpio_put(PICO_DEFAULT_LED_PIN, 0);
-        return; // Exit setup
+        return; // Exit setup safely
     }
 
     // SUCCESS SIGNAL: Keep LED solidly ON
     gpio_put(PICO_DEFAULT_LED_PIN, 1);
 
-    // 5. Soft Reset MPR121 (using whatever address was found or default)
+    // 5. Soft Reset MPR121
     uint8_t target_addr = (found_addr != 0) ? found_addr : MPR121_I2C_ADDR;
     
     uint8_t reset_buf[2] = { MPR121_SOFT_RESET, 0x63 };
-    i2c_write_blocking(i2c0, target_addr, reset_buf, 2, false);
+    i2c_write_timeout_us(i2c0, target_addr, reset_buf, 2, false, I2C_TIMEOUT_US);
     sleep_ms(20);
 
     // 6. Enter Stop Mode
     uint8_t ecr_stop[2] = { MPR121_ECR, 0x00 };
-    i2c_write_blocking(i2c0, target_addr, ecr_stop, 2, false);
+    i2c_write_timeout_us(i2c0, target_addr, ecr_stop, 2, false, I2C_TIMEOUT_US);
 
     // 7. Threshold Configuration
     for (int i = 0; i < 12; i++) {
         uint8_t tth[2] = { (uint8_t)(0x41 + (i * 2)), 12 };
         uint8_t rth[2] = { (uint8_t)(0x41 + (i * 2) + 1), 6 };
-        i2c_write_blocking(i2c0, target_addr, tth, 2, false);
-        i2c_write_blocking(i2c0, target_addr, rth, 2, false);
+        i2c_write_timeout_us(i2c0, target_addr, tth, 2, false, I2C_TIMEOUT_US);
+        i2c_write_timeout_us(i2c0, target_addr, rth, 2, false, I2C_TIMEOUT_US);
     }
 
     // 8. Run Mode
     uint8_t ecr_run[2] = { MPR121_ECR, 0x8F };
-    i2c_write_blocking(i2c0, target_addr, ecr_run, 2, false);
+    i2c_write_timeout_us(i2c0, target_addr, ecr_run, 2, false, I2C_TIMEOUT_US);
 }
 
 void MPR121Input::process() {
     uint8_t buf[2] = {0};
     uint8_t reg = MPR121_TOUCH_STATUS_LSB;
 
-    if (i2c_write_blocking(i2c0, MPR121_I2C_ADDR, &reg, 1, true) < 0) return;
-    if (i2c_read_blocking(i2c0, MPR121_I2C_ADDR, buf, 2, false) < 0) return;
+    // Non-blocking register write request
+    if (i2c_write_timeout_us(i2c0, MPR121_I2C_ADDR, &reg, 1, true, I2C_TIMEOUT_US) < 0) {
+        return; // Bus failed/timed out, skip frame without blocking main loop
+    }
+
+    // Non-blocking register data read
+    if (i2c_read_timeout_us(i2c0, MPR121_I2C_ADDR, buf, 2, false, I2C_TIMEOUT_US) < 0) {
+        return; // Bus failed/timed out, skip frame without blocking main loop
+    }
 
     uint16_t touched = ((uint16_t)buf[1] << 8) | buf[0];
 
