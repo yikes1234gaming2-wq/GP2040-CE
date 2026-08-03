@@ -1,77 +1,87 @@
 #include "addons/mpr121.h"
 #include "storagemanager.h"
 #include "gamepad.h"
-#include "peripheralmanager.h"
 #include "hardware/i2c.h"
 #include "hardware/gpio.h"
 #include "pico/time.h"
 
 #define MPR121_TOUCH_STATUS_LSB 0x00
 #define MPR121_ECR              0x5E
-#define MPR121_SOFT_RESET       0x80
 
-// Timeouts in microseconds (10ms for setup, 2ms for per-frame read)
-#define SETUP_TIMEOUT_US   10000 
-#define PROCESS_TIMEOUT_US  2000
+// Use generous setup timeout (20ms), quick process timeout (1ms)
+#define SETUP_TIMEOUT_US   20000 
+#define PROCESS_TIMEOUT_US  1000
+
+static bool mpr121_present = false;
 
 void MPR121Input::setup() {
-    // Standard hardware setup for i2c0 on GP0 (SDA) / GP1 (SCL)
+    mpr121_present = false;
+
+    // Set up GP0 (SDA) and GP1 (SCL)
     gpio_set_function(0, GPIO_FUNC_I2C);
     gpio_set_function(1, GPIO_FUNC_I2C);
     gpio_pull_up(0);
     gpio_pull_up(1);
 
-    // Initialize at 100 kHz standard I2C speed
+    // Standard 100kHz I2C speed
     i2c_init(i2c0, 100 * 1000);
 
-    sleep_ms(100); // Power stabilization delay
+    sleep_ms(50); // Power stabilization delay
 
-    // Safe write helper with standard setup timeout
+    // Helper for setup writes (nostop = false to prevent I2C bus locks)
     auto safe_write = [](uint8_t reg, uint8_t val) -> bool {
         uint8_t buf[2] = { reg, val };
         int res = i2c_write_timeout_us(i2c0, MPR121_I2C_ADDR, buf, 2, false, SETUP_TIMEOUT_US);
         return res == 2;
     };
 
-    // 1. Soft reset the MPR121
+    // Probe check: Try to put MPR121 into Stop Mode (0x00 to ECR register)
+    if (!safe_write(MPR121_ECR, 0x00)) {
+        // Device missing or SDA/SCL lines stuck low! 
+        // Bail out gracefully so the Pico and other buttons still work.
+        return; 
+    }
+
+    // Soft reset
     safe_write(0x80, 0x63);
     sleep_ms(10);
 
-    // 2. Put MPR121 in Stop Mode before writing configuration registers
-    if (!safe_write(MPR121_ECR, 0x00)) {
-        return; // Device didn't acknowledge at address 0x5A
-    }
+    // Stop mode again before register updates
+    safe_write(MPR121_ECR, 0x00);
 
-    // 3. Set touch/release thresholds for ELE0 through ELE11
-    // (Touch: 12, Release: 6)
+    // Set touch/release thresholds for ELE0 through ELE11
     for (int i = 0; i < 12; i++) {
         safe_write((uint8_t)(0x41 + (i * 2)), 12);     // Touch threshold
         safe_write((uint8_t)(0x41 + (i * 2) + 1), 6);  // Release threshold
     }
 
-    // Set baseline filtering defaults (FFI / CDC configuration)
+    // Baseline filtering default
     safe_write(0x5D, 0x04);
 
-    // 4. Enter Run Mode (Enable all 12 electrodes with baseline tracking)
-    safe_write(MPR121_ECR, 0x8F);
+    // Enter Run Mode (Enable all 12 electrodes)
+    if (safe_write(MPR121_ECR, 0x8F)) {
+        mpr121_present = true; // Mark device active only if final write succeeded
+    }
 }
 
 void MPR121Input::process() {
-    uint8_t buf[2] = {0};
-    uint8_t reg = MPR121_TOUCH_STATUS_LSB;
+    if (!mpr121_present) return; // Skip completely if setup failed to prevent locking GP2040
 
-    // Send register address to read from
-    if (i2c_write_timeout_us(i2c0, MPR121_I2C_ADDR, &reg, 1, true, PROCESS_TIMEOUT_US) < 0) {
-        return; // Skip frame on timeout/bus error
+    uint8_t reg = MPR121_TOUCH_STATUS_LSB;
+    uint8_t buf[2] = {0};
+
+    // Send register address (nostop MUST be false to prevent I2C hardware hang on dropped ACK)
+    if (i2c_write_timeout_us(i2c0, MPR121_I2C_ADDR, &reg, 1, false, PROCESS_TIMEOUT_US) < 0) {
+        return; 
     }
 
-    // Read 2 bytes of touch status (ELE0-ELE7 in byte 0, ELE8-ELE11 in byte 1)
+    // Read 2 bytes of touch status
     if (i2c_read_timeout_us(i2c0, MPR121_I2C_ADDR, buf, 2, false, PROCESS_TIMEOUT_US) < 0) {
-        return; // Skip frame on timeout/bus error
+        return; 
     }
 
     uint16_t touched = ((uint16_t)buf[1] << 8) | buf[0];
-    if (touched == 0) return; // Save cycles if nothing is touched
+    if (touched == 0) return;
 
     Gamepad *gamepad = Storage::getInstance().GetGamepad();
 
