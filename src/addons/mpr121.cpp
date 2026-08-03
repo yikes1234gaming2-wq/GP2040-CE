@@ -11,21 +11,18 @@
 #define MPR121_SOFT_RESET       0x80
 
 // Timeouts in microseconds (10ms for setup, 2ms for per-frame read)
-#define SETUP_TIMEOUT_US  10000 
-#define PROCESS_TIMEOUT_US 2000
+#define SETUP_TIMEOUT_US   10000 
+#define PROCESS_TIMEOUT_US  2000
 
 void MPR121Input::setup() {
-    // Rely on GP2040-CE PeripheralManager for I2C bus setup
-    // Ensure I2C is initialized via PeripheralManager before accessing
-    PeripheralI2C* i2c = PeripheralManager::getInstance().getI2C(0);
-    if (i2c == nullptr || !i2c->configured()) {
-        // Fallback manually only if PeripheralManager isn't managing it
-        gpio_set_function(0, GPIO_FUNC_I2C);
-        gpio_set_function(1, GPIO_FUNC_I2C);
-        gpio_pull_up(0);
-        gpio_pull_up(1);
-        i2c_init(i2c0, 100 * 1000); // 100kHz
-    }
+    // Standard hardware setup for i2c0 on GP0 (SDA) / GP1 (SCL)
+    gpio_set_function(0, GPIO_FUNC_I2C);
+    gpio_set_function(1, GPIO_FUNC_I2C);
+    gpio_pull_up(0);
+    gpio_pull_up(1);
+
+    // Initialize at 100 kHz standard I2C speed
+    i2c_init(i2c0, 100 * 1000);
 
     sleep_ms(100); // Power stabilization delay
 
@@ -36,26 +33,26 @@ void MPR121Input::setup() {
         return res == 2;
     };
 
-    // Soft reset the MPR121
+    // 1. Soft reset the MPR121
     safe_write(0x80, 0x63);
     sleep_ms(10);
 
-    // 1. Put MPR121 in Stop Mode to allow configuration
+    // 2. Put MPR121 in Stop Mode before writing configuration registers
     if (!safe_write(MPR121_ECR, 0x00)) {
-        return; // Device not acknowledging at 0x5A
+        return; // Device didn't acknowledge at address 0x5A
     }
 
-    // 2. Set touch/release thresholds for ELE0 through ELE11
+    // 3. Set touch/release thresholds for ELE0 through ELE11
     // (Touch: 12, Release: 6)
     for (int i = 0; i < 12; i++) {
         safe_write((uint8_t)(0x41 + (i * 2)), 12);     // Touch threshold
         safe_write((uint8_t)(0x41 + (i * 2) + 1), 6);  // Release threshold
     }
 
-    // Set baseline filtering defaults
-    safe_write(0x5D, 0x04); // FFI / CDC configuration
+    // Set baseline filtering defaults (FFI / CDC configuration)
+    safe_write(0x5D, 0x04);
 
-    // 3. Enter Run Mode (Enable all 12 electrodes with baseline tracking)
+    // 4. Enter Run Mode (Enable all 12 electrodes with baseline tracking)
     safe_write(MPR121_ECR, 0x8F);
 }
 
