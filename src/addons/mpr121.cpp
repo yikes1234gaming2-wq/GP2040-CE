@@ -1,92 +1,190 @@
 #include "addons/mpr121.h"
 #include "storagemanager.h"
 #include "gamepad.h"
-#include "hardware/i2c.h"
 #include "hardware/gpio.h"
 #include "pico/time.h"
+
+#define SDA_PIN 0
+#define SCL_PIN 1
 
 #define MPR121_TOUCH_STATUS_LSB 0x00
 #define MPR121_ECR              0x5E
 
-#define SETUP_TIMEOUT_US   10000 
-#define PROCESS_TIMEOUT_US  1000
+static bool mpr121_active = false;
 
-static bool mpr121_present = false;
+// --- Safe Software I2C Driver ---
+
+static inline void i2c_delay() {
+    sleep_us(5); // ~100kHz equivalent speed
+}
+
+static void bb_scl_hi() {
+    gpio_set_dir(SCL_PIN, GPIO_IN); // High impedance (let pull-up pull high)
+}
+
+static void bb_scl_lo() {
+    gpio_set_dir(SCL_PIN, GPIO_OUT);
+    gpio_put(SCL_PIN, 0);
+}
+
+static void bb_sda_hi() {
+    gpio_set_dir(SDA_PIN, GPIO_IN); // High impedance
+}
+
+static void bb_sda_lo() {
+    gpio_set_dir(SDA_PIN, GPIO_OUT);
+    gpio_put(SDA_PIN, 0);
+}
+
+static void bb_start() {
+    bb_sda_hi();
+    bb_scl_hi();
+    i2c_delay();
+    bb_sda_lo();
+    i2c_delay();
+    bb_scl_lo();
+    i2c_delay();
+}
+
+static void bb_stop() {
+    bb_sda_lo();
+    i2c_delay();
+    bb_scl_hi();
+    i2c_delay();
+    bb_sda_hi();
+    i2c_delay();
+}
+
+static bool bb_write_byte(uint8_t byte) {
+    for (int i = 7; i >= 0; i--) {
+        if ((byte >> i) & 1) {
+            bb_sda_hi();
+        } else {
+            bb_sda_lo();
+        }
+        i2c_delay();
+        bb_scl_hi();
+        i2c_delay();
+        bb_scl_lo();
+    }
+
+    // Read ACK with timeout guard
+    bb_sda_hi();
+    i2c_delay();
+    bb_scl_hi();
+    i2c_delay();
+
+    bool ack = (gpio_get(SDA_PIN) == 0);
+
+    bb_scl_lo();
+    i2c_delay();
+    return ack;
+}
+
+static uint8_t bb_read_byte(bool ack) {
+    uint8_t byte = 0;
+    bb_sda_hi();
+
+    for (int i = 7; i >= 0; i--) {
+        bb_scl_hi();
+        i2c_delay();
+        byte |= (gpio_get(SDA_PIN) << i);
+        bb_scl_lo();
+        i2c_delay();
+    }
+
+    // Send ACK/NACK
+    if (ack) {
+        bb_sda_lo();
+    } else {
+        bb_sda_hi();
+    }
+    i2c_delay();
+    bb_scl_hi();
+    i2c_delay();
+    bb_scl_lo();
+    bb_sda_hi();
+    i2c_delay();
+
+    return byte;
+}
+
+static bool bb_write_reg(uint8_t reg, uint8_t val) {
+    bb_start();
+    if (!bb_write_byte((MPR121_I2C_ADDR << 1) | 0)) { bb_stop(); return false; }
+    if (!bb_write_byte(reg))                       { bb_stop(); return false; }
+    if (!bb_write_byte(val))                       { bb_stop(); return false; }
+    bb_stop();
+    return true;
+}
+
+static bool bb_read_bytes(uint8_t reg, uint8_t *dest, uint8_t count) {
+    bb_start();
+    if (!bb_write_byte((MPR121_I2C_ADDR << 1) | 0)) { bb_stop(); return false; }
+    if (!bb_write_byte(reg))                       { bb_stop(); return false; }
+
+    bb_start(); // Repeated START
+    if (!bb_write_byte((MPR121_I2C_ADDR << 1) | 1)) { bb_stop(); return false; }
+
+    for (uint8_t i = 0; i < count; i++) {
+        dest[i] = bb_read_byte(i < (count - 1)); // ACK all except last byte
+    }
+    bb_stop();
+    return true;
+}
+
+// --- Addon Core ---
 
 void MPR121Input::setup() {
-    mpr121_present = false;
+    mpr121_active = false;
 
-    const uint sda_pin = 0;
-    const uint scl_pin = 1;
+    // Initialize pins as standard GPIOs with internal pull-ups
+    gpio_init(SDA_PIN);
+    gpio_init(SCL_PIN);
+    gpio_set_dir(SDA_PIN, GPIO_IN);
+    gpio_set_dir(SCL_PIN, GPIO_IN);
+    gpio_pull_up(SDA_PIN);
+    gpio_pull_up(SCL_PIN);
 
-    // 1. Temporarily set pins as general GPIO inputs with pull-ups to check line health
-    gpio_init(sda_pin);
-    gpio_init(scl_pin);
-    gpio_set_dir(sda_pin, GPIO_IN);
-    gpio_set_dir(scl_pin, GPIO_IN);
-    gpio_pull_up(sda_pin);
-    gpio_pull_up(scl_pin);
+    sleep_ms(50); // Power stabilization
 
-    sleep_us(100); // Small settling delay
-
-    // If either line is stuck LOW, the bus is shorted or miswired. 
-    // ABORT immediately to prevent i2c_init from freezing the Pico!
-    if (!gpio_get(sda_pin) || !gpio_get(scl_pin)) {
-        return; 
+    // Check if lines are dead-shorted to GND
+    if (!gpio_get(SDA_PIN) || !gpio_get(SCL_PIN)) {
+        return; // Line is held ground permanently, abort safely!
     }
 
-    // 2. Lines are clear! Now assign to I2C peripheral hardware
-    gpio_set_function(sda_pin, GPIO_FUNC_I2C);
-    gpio_set_function(scl_pin, GPIO_FUNC_I2C);
-
-    // Initialize I2C hardware at standard speed
-    i2c_init(i2c0, 100 * 1000);
-
-    sleep_ms(50); // Power stabilization delay
-
-    auto safe_write = [](uint8_t reg, uint8_t val) -> bool {
-        uint8_t buf[2] = { reg, val };
-        int res = i2c_write_timeout_us(i2c0, MPR121_I2C_ADDR, buf, 2, false, SETUP_TIMEOUT_US);
-        return res == 2;
-    };
-
-    // Probe: Try setting ECR to 0x00 (Stop Mode)
-    if (!safe_write(MPR121_ECR, 0x00)) {
-        return; // MPR121 not answering at 0x5A, safely abort
+    // Probe: Soft Reset MPR121
+    if (!bb_write_reg(0x80, 0x63)) {
+        return; // Device didn't respond at 0x5A! Bails cleanly so Pico boots.
     }
 
-    // Soft reset sequence
-    safe_write(0x80, 0x63);
     sleep_ms(10);
-    safe_write(MPR121_ECR, 0x00);
 
-    // Set touch/release thresholds (ELE0 to ELE11)
+    // Stop Mode before register setup
+    bb_write_reg(MPR121_ECR, 0x00);
+
+    // Set touch (12) / release (6) thresholds for all 12 electrodes
     for (int i = 0; i < 12; i++) {
-        safe_write((uint8_t)(0x41 + (i * 2)), 12);     // Touch
-        safe_write((uint8_t)(0x41 + (i * 2) + 1), 6);  // Release
+        bb_write_reg((uint8_t)(0x41 + (i * 2)), 12);
+        bb_write_reg((uint8_t)(0x41 + (i * 2) + 1), 6);
     }
 
     // Default baseline filtering
-    safe_write(0x5D, 0x04);
+    bb_write_reg(0x5D, 0x04);
 
-    // Enable electrodes (Run Mode)
-    if (safe_write(MPR121_ECR, 0x8F)) {
-        mpr121_present = true;
+    // Run Mode (Enable all 12 electrodes)
+    if (bb_write_reg(MPR121_ECR, 0x8F)) {
+        mpr121_active = true;
     }
 }
 
 void MPR121Input::process() {
-    if (!mpr121_present) return;
+    if (!mpr121_active) return; // Completely skips if setup failed!
 
-    uint8_t reg = MPR121_TOUCH_STATUS_LSB;
     uint8_t buf[2] = {0};
 
-    if (i2c_write_timeout_us(i2c0, MPR121_I2C_ADDR, &reg, 1, false, PROCESS_TIMEOUT_US) < 0) {
-        return; 
-    }
-
-    if (i2c_read_timeout_us(i2c0, MPR121_I2C_ADDR, buf, 2, false, PROCESS_TIMEOUT_US) < 0) {
-        return; 
+    if (!bb_read_bytes(MPR121_TOUCH_STATUS_LSB, buf, 2)) {
+        return; // Skip cycle if read failed
     }
 
     uint16_t touched = ((uint16_t)buf[1] << 8) | buf[0];
@@ -104,7 +202,7 @@ void MPR121Input::process() {
     if (touched & (1 << 5))  gamepad->state.buttons |= GAMEPAD_MASK_B1; // ELE5
     if (touched & (1 << 6))  gamepad->state.buttons |= GAMEPAD_MASK_B2; // ELE6
     if (touched & (1 << 9))  gamepad->state.buttons |= GAMEPAD_MASK_R1; // ELE9
-    if (touched & (1 << 3))  gamepad->state.buttons |= GAMEPAD_MASK_S1; // ELE3 (Start)
-    if (touched & (1 << 7))  gamepad->state.buttons |= GAMEPAD_MASK_S2; // ELE7 (Select)
+    if (touched & (1 << 3))  gamepad->state.buttons |= GAMEPAD_MASK_S1; // ELE3
+    if (touched & (1 << 7))  gamepad->state.buttons |= GAMEPAD_MASK_S2; // ELE7
     if (touched & (1 << 8))  gamepad->state.buttons |= GAMEPAD_MASK_R2; // ELE8
 }
