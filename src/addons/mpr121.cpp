@@ -8,8 +8,7 @@
 #define MPR121_TOUCH_STATUS_LSB 0x00
 #define MPR121_ECR              0x5E
 
-// Use generous setup timeout (20ms), quick process timeout (1ms)
-#define SETUP_TIMEOUT_US   20000 
+#define SETUP_TIMEOUT_US   10000 
 #define PROCESS_TIMEOUT_US  1000
 
 static bool mpr121_present = false;
@@ -17,65 +16,75 @@ static bool mpr121_present = false;
 void MPR121Input::setup() {
     mpr121_present = false;
 
-    // Set up GP0 (SDA) and GP1 (SCL)
-    gpio_set_function(0, GPIO_FUNC_I2C);
-    gpio_set_function(1, GPIO_FUNC_I2C);
-    gpio_pull_up(0);
-    gpio_pull_up(1);
+    const uint sda_pin = 0;
+    const uint scl_pin = 1;
 
-    // Standard 100kHz I2C speed
+    // 1. Temporarily set pins as general GPIO inputs with pull-ups to check line health
+    gpio_init(sda_pin);
+    gpio_init(scl_pin);
+    gpio_set_dir(sda_pin, GPIO_IN);
+    gpio_set_dir(scl_pin, GPIO_IN);
+    gpio_pull_up(sda_pin);
+    gpio_pull_up(scl_pin);
+
+    sleep_us(100); // Small settling delay
+
+    // If either line is stuck LOW, the bus is shorted or miswired. 
+    // ABORT immediately to prevent i2c_init from freezing the Pico!
+    if (!gpio_get(sda_pin) || !gpio_get(scl_pin)) {
+        return; 
+    }
+
+    // 2. Lines are clear! Now assign to I2C peripheral hardware
+    gpio_set_function(sda_pin, GPIO_FUNC_I2C);
+    gpio_set_function(scl_pin, GPIO_FUNC_I2C);
+
+    // Initialize I2C hardware at standard speed
     i2c_init(i2c0, 100 * 1000);
 
     sleep_ms(50); // Power stabilization delay
 
-    // Helper for setup writes (nostop = false to prevent I2C bus locks)
     auto safe_write = [](uint8_t reg, uint8_t val) -> bool {
         uint8_t buf[2] = { reg, val };
         int res = i2c_write_timeout_us(i2c0, MPR121_I2C_ADDR, buf, 2, false, SETUP_TIMEOUT_US);
         return res == 2;
     };
 
-    // Probe check: Try to put MPR121 into Stop Mode (0x00 to ECR register)
+    // Probe: Try setting ECR to 0x00 (Stop Mode)
     if (!safe_write(MPR121_ECR, 0x00)) {
-        // Device missing or SDA/SCL lines stuck low! 
-        // Bail out gracefully so the Pico and other buttons still work.
-        return; 
+        return; // MPR121 not answering at 0x5A, safely abort
     }
 
-    // Soft reset
+    // Soft reset sequence
     safe_write(0x80, 0x63);
     sleep_ms(10);
-
-    // Stop mode again before register updates
     safe_write(MPR121_ECR, 0x00);
 
-    // Set touch/release thresholds for ELE0 through ELE11
+    // Set touch/release thresholds (ELE0 to ELE11)
     for (int i = 0; i < 12; i++) {
-        safe_write((uint8_t)(0x41 + (i * 2)), 12);     // Touch threshold
-        safe_write((uint8_t)(0x41 + (i * 2) + 1), 6);  // Release threshold
+        safe_write((uint8_t)(0x41 + (i * 2)), 12);     // Touch
+        safe_write((uint8_t)(0x41 + (i * 2) + 1), 6);  // Release
     }
 
-    // Baseline filtering default
+    // Default baseline filtering
     safe_write(0x5D, 0x04);
 
-    // Enter Run Mode (Enable all 12 electrodes)
+    // Enable electrodes (Run Mode)
     if (safe_write(MPR121_ECR, 0x8F)) {
-        mpr121_present = true; // Mark device active only if final write succeeded
+        mpr121_present = true;
     }
 }
 
 void MPR121Input::process() {
-    if (!mpr121_present) return; // Skip completely if setup failed to prevent locking GP2040
+    if (!mpr121_present) return;
 
     uint8_t reg = MPR121_TOUCH_STATUS_LSB;
     uint8_t buf[2] = {0};
 
-    // Send register address (nostop MUST be false to prevent I2C hardware hang on dropped ACK)
     if (i2c_write_timeout_us(i2c0, MPR121_I2C_ADDR, &reg, 1, false, PROCESS_TIMEOUT_US) < 0) {
         return; 
     }
 
-    // Read 2 bytes of touch status
     if (i2c_read_timeout_us(i2c0, MPR121_I2C_ADDR, buf, 2, false, PROCESS_TIMEOUT_US) < 0) {
         return; 
     }
