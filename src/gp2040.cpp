@@ -102,7 +102,7 @@ void GP2040::setup() {
 	// Setup Add-ons
 	addons.LoadUSBAddon(new KeyboardHostAddon());
 	addons.LoadUSBAddon(new GamepadUSBHostAddon());
-	addons.LoadAddon(new MPR121Input());
+	//addons.LoadAddon(new MPR121Input());
 	addons.LoadAddon(new AnalogInput());
 	addons.LoadAddon(new HETriggerAddon());
 	addons.LoadAddon(new BootselButtonAddon());
